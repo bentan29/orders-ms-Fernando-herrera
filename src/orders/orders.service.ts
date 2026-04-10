@@ -7,13 +7,15 @@ import { ClientProxy, RpcException } from '@nestjs/microservices';
 import { NATS_SERVICE,} from 'src/config';
 import { firstValueFrom } from 'rxjs';
 import { ProductInterface } from 'src/interfaces/Product.interface';
+import { OrderWithProducts } from './interfaces/order-with-products.interface';
+import { PaidOrderDto } from './dto';
 
 
 @Injectable()
 export class OrdersService extends PrismaClient implements OnModuleInit {
-
+ 
   constructor(
-    //* Conexion con el microservicio de products
+    //* Conexion con nats, que vamos a usar para el microservicio de products
     @Inject(NATS_SERVICE) private readonly natsClient: ClientProxy 
   ){
     super()
@@ -35,7 +37,7 @@ export class OrdersService extends PrismaClient implements OnModuleInit {
       //✅ 1. Tomamos los id de los productos de la orden
       const productsIds = createOrderDto.items.map(item => item.productId)
 
-      //- Tomamos los productos directos de la BD
+      //- Tomamos los productos directos de la BD de Products
       const products: ProductInterface[] = await firstValueFrom(
         //?- Comunicacion con el microservicio de products
         this.natsClient.send({cmd: 'validate_products'}, productsIds) 
@@ -202,6 +204,55 @@ export class OrdersService extends PrismaClient implements OnModuleInit {
 
   }
 
+
+ 
+  //* ----------- Este Metodo va a ser llamado desde orderController luego de haberse creado la orden 
+  async createPaymentSession(order: OrderWithProducts) {
+    
+    const paymentSession = await firstValueFrom(
+      //- Emitimos al microservicio de los Payments
+      this.natsClient.send('create.payment.session', {
+        orderId: order.id,
+        currency: 'usd',
+        items: order.OrderItem.map( item => ({
+          name: item.name,
+          price: item.price,
+          quantity: item.quantity
+        }))
+
+      })
+    )
+
+    return paymentSession;
+
+  }
+
+
+  //* ----------- Pago de la orden, en el curso lo nombra paidOrder
+  async markOrderAsPaid(paidOrderDto: PaidOrderDto) {
+
+
+    this.logger.log('order Paiddd', paidOrderDto);
+
+    //?- Actualizamos en base de datos la orden pagada
+    const order = await this.order.update({
+      where: { id: paidOrderDto.orderId},
+      data: {
+        status: 'PAID',
+        paid: true,
+        paidAt: new Date(),
+        stripeChargeId: paidOrderDto.stripePaymentId,
+        OrderReceipt: {  //?- Actualizamos el recivo del pago en la tabla relacionada 'OrderReceipt'
+          create: {
+            receiptUrl: paidOrderDto.receiptUrl
+          }
+        }
+      }
+    });
+
+    return order;
+
+  }
 
 
 }
